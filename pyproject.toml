@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "herokutl"
+dynamic = ["version"]
+description = "This library is built for the Heroku userbot and is based on Telethon."
+readme = { file = "README.rst", content-type = "text/markdown" }
+license = "MIT"
+requires-python = ">=3.5"
+authors = [
+    { name = "Codrago", email = "codrago@xyecoc.com" },
+]
+keywords = [
+    "api",
+    "chat",
+    "client",
+    "library",
+    "messaging",
+    "mtproto",
+    "telegram",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.5",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    "pyaes",
+    "rsa",
+    "bs4==0.0.2",
+]
+
+[project.optional-dependencies]
+cryptg = [
+    "cryptg",
+]
+
+[project.urls]
+Homepage = "https://github.com/coddrago/heroku-tl"
+Source = "https://github.com/coddrago/heroku-tl"
+Download = "https://pypi.org/project/herokutl/"
+Documentation = "https://docs.telethon.dev"
+Reference = "https://tl.telethon.dev"
+
+[tool.hatch.version]
+path = "herokutl/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/herokutl",
+    "/telethon_generator",
+    "/hatch_build.py",
+]
+
+[tool.hatch.build.hooks.custom]

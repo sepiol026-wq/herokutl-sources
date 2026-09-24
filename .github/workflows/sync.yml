@@ -1,0 +1,46 @@
+name: Sync PyPI Sources
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install packaging
+
+      - name: Sync sources
+        id: sync
+        run: |
+          python .github/scripts/sync.py
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            VERSION="${{ steps.sync.outputs.version }}"
+            if [ -z "$VERSION" ]; then
+              VERSION="latest"
+            fi
+            git add -A
+            git commit -m "Update herokutl to ${VERSION}"
+            git tag -f "v${VERSION}"
+            git push origin HEAD --tags
+          fi

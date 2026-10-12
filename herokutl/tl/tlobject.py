@@ -1,9 +1,11 @@
 import base64
 import json
+import logging
 import struct
 from datetime import datetime, date, timedelta, timezone
 import time
 from ..errors import common
+from .._security import SecurityGate, SecurityViolation, FORBIDDEN_CONSTRUCTORS
 
 _ScamDetectionError = None
 
@@ -12,24 +14,14 @@ _EPOCH_NAIVE_LOCAL = datetime(*time.localtime(0)[:6])
 _EPOCH = _EPOCH_NAIVE.replace(tzinfo=timezone.utc)
 
 
-FORBIDDEN_CONSTRUCTORS = {
-    0xA2C0CF74,  # account.DeleteAccount
-    0x449E0B51,  # account.GetTmpPassword
-    0x9308CE1B,  # account.ResetPassword
-    0xD36BF79,  # auth.CheckRecoveryPassword
-    0xA59B102F,  # account.UpdatePasswordSettings
-    0x9A5C33E5,  # account.PasswordSettings
-    0x9FAB0D1A,  # auth.ResetAuthorizations
-    0xA929597A,  # account.GetAuthorizationForm
-    0xE320C158,  # account.GetAuthorizations
-    0xF8654027,  # contacts.ExportContactToken
-}
 
 _VECTOR_CONSTRUCTOR_ID = 0x1CB5C415
 _USERS_GET_USERS_CONSTRUCTOR_ID = 0x0D91A548
 _INPUT_USER_SELF_CONSTRUCTOR_ID = 0xF7C1B13F
 _GENERATED_FUNCTIONS_MODULE_PREFIX = "herokutl.tl.functions"
 _MASKED_PHONE = "phone?"
+_GET_USERS_BYTES = struct.pack("<I", _USERS_GET_USERS_CONSTRUCTOR_ID)
+_INPUT_USER_SELF_BYTES = struct.pack("<I", _INPUT_USER_SELF_CONSTRUCTOR_ID)
 FORBIDDEN_WEBAPP_IDS = [1985737506, 1559501630]
 
 DUMMY_MESSAGE_KWARGS = {
@@ -56,10 +48,10 @@ def _scam_detection_error_cls():
 
 
 def _raise_if_forbidden_constructor(cls):
-    if cls.CONSTRUCTOR_ID in _get_forbid_constructors():
-        raise _scam_detection_error_cls()(
-            f"Usage of {cls.__name__} is forbidden due to its CONSTRUCTOR_ID."
-        )
+    try:
+        SecurityGate.check_constructor(cls.CONSTRUCTOR_ID or 0, cls.__name__)
+    except SecurityViolation as e:
+        raise _scam_detection_error_cls()(str(e)) from None
 
 
 def _read_uint(data, offset):
@@ -92,12 +84,19 @@ def _serialized_get_users_targets_self(data, offset):
         # The peer is nested and variable-sized, so keep scanning the rest of the
         # serialized request instead of trying to partially deserialize it here.
         else:
-            return any(
-                _read_uint(data, i) == _INPUT_USER_SELF_CONSTRUCTOR_ID
-                for i in range(offset + 4, len(data) - 3, 4)
-            )
+            return next(
+                _aligned_matches(data, _INPUT_USER_SELF_BYTES, offset + 4), None
+            ) is not None
 
     return False
+
+
+def _aligned_matches(data, pattern, start=0):
+    offset = data.find(pattern, start)
+    while offset != -1:
+        if offset % 4 == 0:
+            yield offset
+        offset = data.find(pattern, offset + 1)
 
 
 def _serialized_request_gets_self_user(data):
@@ -106,9 +105,8 @@ def _serialized_request_gets_self_user(data):
 
     data = bytes(data)
     return any(
-        _read_uint(data, offset) == _USERS_GET_USERS_CONSTRUCTOR_ID
-        and _serialized_get_users_targets_self(data, offset)
-        for offset in range(0, len(data) - 3, 4)
+        _serialized_get_users_targets_self(data, offset)
+        for offset in _aligned_matches(data, _GET_USERS_BYTES)
     )
 
 
@@ -140,18 +138,66 @@ def _raise_if_forbidden_serialized_request(request, data):
         return
 
     data = bytes(data)
-    forbidden = _get_forbid_constructors()
-    for offset in range(0, len(data) - 3, 4):
-        if _read_uint(data, offset) in forbidden:
-            raise _scam_detection_error_cls()(
-                "Usage of a forbidden raw TL constructor is forbidden."
-            )
+    try:
+        SecurityGate.check_serialized(data)
+    except SecurityViolation as e:
+        raise _scam_detection_error_cls()(str(e)) from None
 
     if _serialized_request_gets_self_user(
         data
     ) and _is_raw_or_external_serialized_request(request):
         raise _scam_detection_error_cls()(
             "Raw users.getUsers(InputUserSelf) requests are forbidden."
+        )
+
+_SECURITY_BASELINE = None
+_TAMPER_ALERTED = False
+_security_logger = logging.getLogger(__name__)
+
+
+def _snapshot_security_state():
+    return {
+        "TLObject.__new__": vars(TLObject).get("__new__"),
+        "TLObject.__init__": vars(TLObject).get("__init__"),
+        "TLObject._assert_constructor_allowed": vars(TLObject).get(
+            "_assert_constructor_allowed"
+        ),
+        "TLObject._assert_no_forbidden_constructors": vars(TLObject).get(
+            "_assert_no_forbidden_constructors"
+        ),
+        "TLObject.__bytes__": vars(TLObject).get("__bytes__"),
+        "_raise_if_forbidden_constructor": globals().get(
+            "_raise_if_forbidden_constructor"
+        ),
+        "_raise_if_forbidden_serialized_request": globals().get(
+            "_raise_if_forbidden_serialized_request"
+        ),
+    }
+
+
+def _capture_security_baseline():
+    global _SECURITY_BASELINE
+    if _SECURITY_BASELINE is None:
+        _SECURITY_BASELINE = _snapshot_security_state()
+
+
+def _verify_security_integrity():
+    global _TAMPER_ALERTED
+    if _SECURITY_BASELINE is None or _TAMPER_ALERTED:
+        return
+    current = _snapshot_security_state()
+    tampered = [
+        name
+        for name, original in _SECURITY_BASELINE.items()
+        if current.get(name) is not original
+    ]
+    if tampered:
+        _TAMPER_ALERTED = True
+        _security_logger.critical(
+            "Security enforcement tampering detected in herokutl.tl.tlobject: "
+            + ", ".join(tampered)
+            + ". A loaded module has rebound one or more of the account "
+            "safety checks."
         )
 
 
@@ -240,7 +286,10 @@ class TLObject:
     SUBCLASS_OF_ID = None
 
     def __new__(cls, *args, **kwargs):
-        _raise_if_forbidden_constructor(cls)
+        try:
+            SecurityGate.check_constructor(cls.CONSTRUCTOR_ID or 0, cls.__name__)
+        except SecurityViolation as e:
+            raise _scam_detection_error_cls()(str(e)) from None
         return super().__new__(cls)
 
     def __init__(self):
@@ -270,9 +319,13 @@ class TLObject:
 
     @classmethod
     def _assert_constructor_allowed(cls):
-        _raise_if_forbidden_constructor(cls)
+        try:
+            SecurityGate.check_constructor(cls.CONSTRUCTOR_ID or 0, cls.__name__)
+        except SecurityViolation as e:
+            raise _scam_detection_error_cls()(str(e)) from None
 
     def _assert_no_forbidden_constructors(self):
+        _verify_security_integrity()
         visited = set()
 
         def walk(value):
@@ -504,6 +557,8 @@ class TLObject:
     @classmethod
     def from_reader(cls, reader):
         raise NotImplementedError
+
+_capture_security_baseline()
 
 
 class TLRequest(TLObject):

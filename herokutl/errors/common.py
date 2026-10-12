@@ -4,6 +4,7 @@ import struct
 import textwrap
 
 from ..tl import TLRequest
+from .._security import SecurityViolation
 
 
 class ReadCancelledError(Exception):
@@ -24,7 +25,7 @@ class TypeNotFoundError(Exception):
             "Could not find a matching Constructor ID for the TLObject "
             "that was supposed to be read with ID {:08x}. See the FAQ "
             "for more details. "
-            "Remaining bytes: {!r}".format(invalid_constructor_id, remaining)
+            "Remaining byte count: {}".format(invalid_constructor_id, len(remaining))
         )
 
         self.invalid_constructor_id = invalid_constructor_id
@@ -176,7 +177,7 @@ class MultiError(Exception):
         return self
 
 
-class ScamDetectionError(Exception):
+class ScamDetectionError(SecurityViolation):
     """Exception for scam detection"""
 
     def __init__(self, error_message: str):
